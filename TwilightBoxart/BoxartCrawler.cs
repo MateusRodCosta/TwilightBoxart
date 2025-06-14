@@ -7,6 +7,8 @@ using SixLabors.ImageSharp;
 using TwilightBoxart.Data;
 using TwilightBoxart.Helpers;
 using TwilightBoxart.Models.Base;
+using System.Linq;
+using System.Collections.Generic;
 
 namespace TwilightBoxart
 {
@@ -29,75 +31,144 @@ namespace TwilightBoxart
             _romDb.Initialize(_progress);
         }
 
-    public async Task DownloadArt(string romsPath, string boxArtPath, int defaultWidth, int defaultHeight, bool useAspect = false)
-    {
-        _progress?.Report($"Scanning {romsPath}..");
-
-        try
+        public async Task DownloadArt(string romsPath, string boxArtPath, int defaultWidth, int defaultHeight, bool useAspect = false)
         {
-            if (!Directory.Exists(romsPath))
-            {
-                _progress?.Report($"Could not open {romsPath}.");
-                return;
-            }
+            _progress?.Report($"Scanning {romsPath}..");
 
-            foreach (var romFile in Directory.EnumerateFiles(romsPath, "*.*", SearchOption.AllDirectories))
+            try
             {
-                var ext = Path.GetExtension(romFile).ToLower();
-                if (!BoxartConfig.ExtensionMapping.ContainsKey(ext))
-                    continue;
-
-                var targetArtFile = Path.Combine(boxArtPath, Path.GetFileName(romFile) + ".png");
-                if (File.Exists(targetArtFile))
+                if (!Directory.Exists(romsPath))
                 {
-                    // We already have it.
-                    _progress?.Report($"Skipping {Path.GetFileName(romFile)}.. (We already have it)");
-                    continue;
+                    _progress?.Report($"Could not open {romsPath}.");
+                    return;
                 }
 
+                // Skip system directories that might cause permission issues
+                var skipDirs = new[] { ".Spotlight-V100", ".Trashes", ".fseventsd", ".TemporaryItems" };
+
+                // Use a safer approach to enumerate files
+                var files = new List<string>();
                 try
                 {
-                    _progress?.Report($"Searching art for {Path.GetFileName(romFile)}.. ");
+                    // Start with just the root directory
+                    var directoriesToScan = new Queue<string>();
+                    directoriesToScan.Enqueue(romsPath);
 
-                    var rom = Rom.FromFile(romFile);
-                    _romDb.AddMetadata(rom);
-
-                    var downloader = new ImgDownloader(defaultWidth, defaultHeight);
-                    if (useAspect && BoxartConfig.AspectRatioMapping.TryGetValue(rom.ConsoleType, out var size))
+                    // Process directories one by one, avoiding system directories
+                    while (directoriesToScan.Count > 0)
                     {
-                        if (rom.ConsoleType == ConsoleType.SuperNintendoEntertainmentSystem)
+                        var currentDir = directoriesToScan.Dequeue();
+                        
+                        // Skip if this is a system directory
+                        if (skipDirs.Any(skipDir => currentDir.Contains(Path.DirectorySeparatorChar + skipDir + Path.DirectorySeparatorChar)))
                         {
-                            if ((rom.NoIntroName?.ToLower().Contains("(japan)", StringComparison.OrdinalIgnoreCase) ?? false) ||
-                                (rom.SearchName?.ToLower().Contains("(japan)", StringComparison.OrdinalIgnoreCase) ?? false))
+                            continue;
+                        }
+
+                        try
+                        {
+                            // Get files from current directory
+                            files.AddRange(Directory.GetFiles(currentDir, "*.*"));
+
+                            // Get subdirectories and add them to the queue
+                            foreach (var subDir in Directory.GetDirectories(currentDir))
                             {
-                                size = new Size(84, 115);
+                                // Only add if it's not a system directory
+                                if (!skipDirs.Any(skipDir => subDir.EndsWith(Path.DirectorySeparatorChar + skipDir)))
+                                {
+                                    directoriesToScan.Enqueue(subDir);
+                                }
                             }
                         }
-                        downloader.SetSizeAdjustedToAspectRatio(size);
+                        catch (UnauthorizedAccessException)
+                        {
+                            // Skip directories we can't access
+                            continue;
+                        }
+                        catch (IOException)
+                        {
+                            // Skip directories that cause I/O errors
+                            continue;
+                        }
                     }
-
-                    rom.SetDownloader(downloader);
-
-                    Directory.CreateDirectory(Path.GetDirectoryName(targetArtFile));
-                    await rom.DownloadBoxArt(targetArtFile);
-                    _progress?.Report("Got it!");
-                }
-                catch (NoMatchException ex)
-                {
-                    _progress?.Report(ex.Message);
                 }
                 catch (Exception e)
                 {
-                    _progress?.Report("Something bad happened: " + e.Message);
+                    _progress?.Report($"Error scanning directories: {e.Message}");
+                    return;
                 }
-            }
 
-            _progress?.Report("Finished scan.");
-        }
-        catch (Exception e)
-        {
-            _progress?.Report("Unhandled exception occured! " + e);
+                foreach (var romFile in files)
+                {
+                    try
+                    {
+                        var ext = Path.GetExtension(romFile).ToLower();
+                        if (!BoxartConfig.ExtensionMapping.ContainsKey(ext))
+                            continue;
+
+                        var targetArtFile = Path.Combine(boxArtPath, Path.GetFileName(romFile) + ".png");
+                        if (File.Exists(targetArtFile))
+                        {
+                            // We already have it.
+                            _progress?.Report($"Skipping {Path.GetFileName(romFile)}.. (We already have it)");
+                            continue;
+                        }
+
+                        try
+                        {
+                            _progress?.Report($"Searching art for {Path.GetFileName(romFile)}.. ");
+
+                            var rom = Rom.FromFile(romFile);
+                            _romDb.AddMetadata(rom);
+
+                            var downloader = new ImgDownloader(defaultWidth, defaultHeight);
+                            if (useAspect && BoxartConfig.AspectRatioMapping.TryGetValue(rom.ConsoleType, out var size))
+                            {
+                                if (rom.ConsoleType == ConsoleType.SuperNintendoEntertainmentSystem)
+                                {
+                                    if ((rom.NoIntroName?.ToLower().Contains("(japan)", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                                        (rom.SearchName?.ToLower().Contains("(japan)", StringComparison.OrdinalIgnoreCase) ?? false))
+                                    {
+                                        size = new Size(84, 115);
+                                    }
+                                }
+                                downloader.SetSizeAdjustedToAspectRatio(size);
+                            }
+
+                            rom.SetDownloader(downloader);
+
+                            Directory.CreateDirectory(Path.GetDirectoryName(targetArtFile));
+                            await rom.DownloadBoxArt(targetArtFile);
+                            _progress?.Report("Got it!");
+                        }
+                        catch (NoMatchException ex)
+                        {
+                            _progress?.Report(ex.Message);
+                        }
+                        catch (Exception e)
+                        {
+                            _progress?.Report("Something bad happened: " + e.Message);
+                        }
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        // Skip files we don't have permission to access
+                        continue;
+                    }
+                    catch (IOException)
+                    {
+                        // Skip files that cause I/O errors
+                        continue;
+                    }
+                }
+
+                _progress?.Report("Finished scan.");
+            }
+            catch (Exception e)
+            {
+                _progress?.Report("Unhandled exception occurred! " + e);
+            }
         }
     }
 }
-}
+
